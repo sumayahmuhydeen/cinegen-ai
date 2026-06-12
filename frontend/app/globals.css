@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 248 95% 68%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --accent: 142 71% 45%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 5.9% 90%;
+  --input: 240 5.9% 90%;
+  --ring: 248 95% 68%;
+  --radius: 0.5rem;
+  --purple: #6D5DFC;
+  --purple-light: #EDE9FF;
+  --dark: #1A1A2E;
+  --green: #22C55E;
+}
+
+.dark {
+  --background: 222 47% 8%;
+  --foreground: 0 0% 95%;
+  --card: 222 47% 11%;
+  --card-foreground: 0 0% 95%;
+  --popover: 222 47% 11%;
+  --popover-foreground: 0 0% 95%;
+  --primary: 248 95% 68%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 222 47% 15%;
+  --secondary-foreground: 0 0% 95%;
+  --muted: 222 47% 15%;
+  --muted-foreground: 240 5% 64.9%;
+  --accent: 142 71% 45%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 62.8% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 222 47% 18%;
+  --input: 222 47% 18%;
+  --ring: 248 95% 68%;
+}
+
+* { box-sizing: border-box; }
+body { background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: var(--font-geist-sans), system-ui, sans-serif; }
