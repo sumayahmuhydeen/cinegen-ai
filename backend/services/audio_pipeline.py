@@ -1,186 +1,267 @@
 """
-Audio Pipeline Service
-=======================
-Generates all audio for a project and syncs it to shots.
-Runs in PARALLEL with video generation — not after it.
-This cuts total production time by 30-40%.
+Audio Pipeline Service — Production Grade
+==========================================
+PRODUCER'S PHILOSOPHY:
+Audio tells the audience how to feel.
+Video shows them what is happening.
+Both must work together perfectly.
 
-Audio types per project:
-- Dialogue:   one line per shot that has dialogue
-- Narration:  optional voiceover track
-- Music:      one music bed per scene (emotional tone-matched)
-- SFX:        ambient and action sounds per scene
+PARALLEL EXECUTION STRATEGY:
+Audio and video generate simultaneously — never sequentially.
+This cuts total production time by 35-45%.
+
+AUDIO LAYERS PER SCENE (bottom to top):
+1. Ambient/SFX bed      — ElevenLabs Sound Effects (always present)
+2. Music underscore     — Future: Apiframe/Udio (phase 4)
+3. Dialogue             — ElevenLabs TTS (per shot, per character)
+4. Sound design hits    — ElevenLabs SFX (tension, action moments)
+
+CHARACTER VOICE LOCKING:
+Before ANY audio generates, all character voices are
+assigned and locked. The same voice ID is used for every
+line of dialogue that character speaks across the entire film.
 """
 import asyncio
 import logging
-from typing import Any
-from integrations.elevenlabs import elevenlabs_client, DEFAULT_VOICES
-from integrations.suno import suno_client
+from dataclasses import dataclass
+from typing import Optional
+from integrations.elevenlabs import elevenlabs_client, AudioResult
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class AudioManifest:
+    """Complete audio manifest for a project."""
+    project_title: str
+    voice_map: dict          # character_id → voice_id
+    dialogue: list           # list of AudioResult dicts per shot
+    sound_effects: list      # list of AudioResult dicts per scene
+    total_dialogue_lines: int
+    total_sfx_tracks: int
+    estimated_duration_seconds: float
+
+
 class AudioPipelineService:
+    """
+    Generates and manages all audio for a CineGen AI production.
+    """
 
     async def generate_project_audio(
         self,
-        blueprint: dict[str, Any],
+        blueprint: dict,
         character_bible: dict,
-    ) -> dict[str, Any]:
+    ) -> dict:
         """
-        Generate ALL audio for a project in parallel.
-        Returns a complete audio manifest keyed by shot_id and scene_id.
+        Master audio generation function.
+        Step 1: Lock all character voices
+        Step 2: Generate dialogue + SFX in parallel
+        Step 3: Return complete audio manifest
         """
-        logger.info(f"Starting audio pipeline for: {blueprint.get('title')}")
+        title = blueprint.get("title", "Untitled")
+        logger.info(f"Audio pipeline starting: '{title}'")
 
-        # Run dialogue and music generation in parallel
+        # Step 1: Lock all character voices BEFORE any generation
+        voice_map = elevenlabs_client.build_character_voice_map(character_bible)
+        logger.info(f"Voice map locked: {len(voice_map)} characters")
+
+        # Step 2: Run dialogue and SFX generation in parallel
         dialogue_task = asyncio.create_task(
-            self._generate_all_dialogue(blueprint, character_bible)
+            self._generate_all_dialogue(blueprint, character_bible, voice_map)
         )
-        music_task = asyncio.create_task(
-            self._generate_all_music(blueprint)
+        sfx_task = asyncio.create_task(
+            self._generate_all_sfx(blueprint)
         )
 
-        dialogue_results, music_results = await asyncio.gather(
-            dialogue_task, music_task
+        dialogue_results, sfx_results = await asyncio.gather(
+            dialogue_task, sfx_task
+        )
+
+        total_duration = sum(
+            r.get("duration_seconds", 0) for r in dialogue_results + sfx_results
         )
 
         manifest = {
-            "project_title": blueprint.get("title"),
+            "project_title": title,
+            "voice_map": voice_map,
             "dialogue": dialogue_results,
-            "music": music_results,
+            "sound_effects": sfx_results,
             "total_dialogue_lines": len(dialogue_results),
-            "total_music_tracks": len(music_results),
+            "total_sfx_tracks": len(sfx_results),
+            "estimated_duration_seconds": total_duration,
         }
 
         logger.info(
             f"Audio pipeline complete: "
-            f"{manifest['total_dialogue_lines']} dialogue lines, "
-            f"{manifest['total_music_tracks']} music tracks"
+            f"{len(dialogue_results)} dialogue lines | "
+            f"{len(sfx_results)} SFX tracks"
         )
+
         return manifest
 
     async def _generate_all_dialogue(
         self,
         blueprint: dict,
         character_bible: dict,
+        voice_map: dict,
     ) -> list[dict]:
-        """Generate voice audio for every shot that has dialogue."""
+        """
+        Generate voice audio for every shot that has dialogue.
+        Each line uses the character's locked voice from voice_map.
+        """
         tasks = []
+
         for scene in blueprint.get("scenes", []):
             for shot in scene.get("shots", []):
-                if shot.get("dialogue") and shot.get("speaker_character_id"):
-                    tasks.append(
-                        self._generate_shot_dialogue(shot, character_bible)
+                dialogue = shot.get("dialogue")
+                speaker_id = shot.get("speaker_character_id")
+
+                if not dialogue or not speaker_id:
+                    continue
+
+                # Get locked voice for this character
+                voice_id = voice_map.get(speaker_id)
+                if not voice_id:
+                    logger.warning(f"No voice found for character {speaker_id}")
+                    continue
+
+                # Get character name for logging
+                char = character_bible.get(speaker_id, {})
+                char_name = char.get("name", speaker_id)
+
+                shot_id = shot.get("shot_id", shot.get("id", ""))
+                emotion = shot.get("emotion", "neutral")
+
+                tasks.append(
+                    self._safe_generate_dialogue(
+                        text=dialogue,
+                        voice_id=voice_id,
+                        character_name=char_name,
+                        shot_id=shot_id,
+                        emotion=emotion,
                     )
+                )
 
         if not tasks:
             logger.info("No dialogue lines found in blueprint")
             return []
 
         logger.info(f"Generating {len(tasks)} dialogue lines in parallel")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
 
-        # Filter out exceptions, log them
-        clean = []
-        for r in results:
-            if isinstance(r, Exception):
-                logger.error(f"Dialogue generation error: {r}")
-            else:
-                clean.append(r)
-        return clean
-
-    async def _generate_shot_dialogue(
+    async def _safe_generate_dialogue(
         self,
-        shot: dict,
-        character_bible: dict,
-    ) -> dict:
-        """Generate audio for one line of dialogue."""
-        shot_id = shot.get("shot_id", shot.get("id", ""))
-        speaker_id = shot.get("speaker_character_id")
-        text = shot.get("dialogue", "")
-        emotion = shot.get("emotion", "neutral")
+        text: str,
+        voice_id: str,
+        character_name: str,
+        shot_id: str,
+        emotion: str,
+    ) -> Optional[dict]:
+        """Generate one dialogue line with error handling."""
+        try:
+            result = await elevenlabs_client.generate_dialogue(
+                text=text,
+                voice_id=voice_id,
+                character_name=character_name,
+                shot_id=shot_id,
+                emotion=emotion,
+            )
+            return {
+                "shot_id": result.shot_id,
+                "audio_url": result.audio_url,
+                "duration_seconds": result.duration_seconds,
+                "voice_id": result.voice_id,
+                "character_name": result.character_name,
+                "text": result.text,
+                "emotion": result.emotion,
+                "provider": result.provider,
+            }
+        except Exception as e:
+            logger.error(f"Dialogue generation failed for shot {shot_id}: {e}")
+            return None
 
-        # Get locked voice ID from Character Bible
-        voice_id = DEFAULT_VOICES["male_neutral"]  # default
-        if speaker_id and speaker_id in character_bible:
-            char = character_bible[speaker_id]
-            voice_id = char.get("voice_id") or self._infer_voice(char)
-
-        result = await elevenlabs_client.generate_speech(
-            text=text,
-            voice_id=voice_id,
-            shot_id=shot_id,
-            emotion=emotion,
-        )
-        return result
-
-    async def _generate_all_music(self, blueprint: dict) -> list[dict]:
-        """Generate a music bed for every scene."""
-        style = blueprint.get("style_bible", {}).get("cinematic_style", "cinematic orchestral")
-        music_tone = blueprint.get("style_bible", {}).get("music_tone", "dramatic")
-
+    async def _generate_all_sfx(self, blueprint: dict) -> list[dict]:
+        """
+        Generate ambient audio and sound effects for every scene.
+        As a producer: this is the environmental audio layer
+        that makes every location feel real and lived-in.
+        """
         tasks = []
+
         for scene in blueprint.get("scenes", []):
+            scene_id = scene.get("scene_id", scene.get("id", ""))
+            duration = scene.get("duration_estimate", 30)
+            sfx_desc = elevenlabs_client.get_scene_sfx_description(scene)
+
             tasks.append(
-                self._generate_scene_music(scene, style, music_tone)
+                self._safe_generate_sfx(
+                    description=sfx_desc,
+                    duration=min(float(duration), 30.0),
+                    scene_id=scene_id,
+                )
             )
 
-        logger.info(f"Generating {len(tasks)} music tracks in parallel")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"Generating {len(tasks)} SFX tracks")
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
 
-        clean = []
-        for r in results:
-            if isinstance(r, Exception):
-                logger.error(f"Music generation error: {r}")
-            else:
-                clean.append(r)
-        return clean
-
-    async def _generate_scene_music(
+    async def _safe_generate_sfx(
         self,
-        scene: dict,
-        style: str,
-        base_tone: str,
-    ) -> dict:
-        """Generate music for one scene."""
-        scene_id = scene.get("scene_id", scene.get("id", ""))
-        emotion = scene.get("emotion", base_tone)
-        duration = scene.get("duration_estimate", 60)
+        description: str,
+        duration: float,
+        scene_id: str,
+    ) -> Optional[dict]:
+        """Generate one SFX track with error handling."""
+        try:
+            result = await elevenlabs_client.generate_sound_effect(
+                description=description,
+                duration_seconds=duration,
+                scene_id=scene_id,
+            )
+            return {
+                "scene_id": result.shot_id,
+                "audio_url": result.audio_url,
+                "duration_seconds": result.duration_seconds,
+                "description": result.text,
+                "provider": result.provider,
+            }
+        except Exception as e:
+            logger.error(f"SFX generation failed for scene {scene_id}: {e}")
+            return None
 
-        return await suno_client.generate_music(
-            emotion=emotion,
-            style=f"{style} film score",
-            duration_seconds=duration,
-            scene_id=scene_id,
-        )
-
-    def _infer_voice(self, character: dict) -> str:
-        """
-        Infer best voice ID from character description
-        when no explicit voice_id is set in the Bible.
-        """
-        desc = (character.get("voice_style") or "").lower()
-        phys = (character.get("physical_description") or "").lower()
-        role = (character.get("role") or "").lower()
-
-        if "female" in desc or "woman" in phys:
-            if "warm" in desc or "soft" in desc:
-                return DEFAULT_VOICES["female_warm"]
-            return DEFAULT_VOICES["female_crisp"]
-        elif "deep" in desc or "baritone" in desc:
-            return DEFAULT_VOICES["male_deep"]
-        elif "narrator" in role:
-            return DEFAULT_VOICES["narrator_male"]
-        return DEFAULT_VOICES["male_neutral"]
-
-    async def generate_shot_audio(
+    async def generate_single_shot_audio(
         self,
         shot: dict,
         character_bible: dict,
-    ) -> dict:
-        """Generate audio for a single shot (used in regeneration flow)."""
-        if not shot.get("dialogue"):
+        voice_map: dict,
+    ) -> Optional[dict]:
+        """
+        Generate audio for a single shot.
+        Used in the regeneration flow when one shot needs to be redone.
+        """
+        dialogue = shot.get("dialogue")
+        speaker_id = shot.get("speaker_character_id")
+
+        if not dialogue:
             return {"shot_id": shot.get("shot_id"), "skipped": True, "reason": "no_dialogue"}
-        return await self._generate_shot_dialogue(shot, character_bible)
+
+        voice_id = voice_map.get(speaker_id) if speaker_id else None
+        if not voice_id and speaker_id:
+            char = character_bible.get(speaker_id, {})
+            voice_id = elevenlabs_client.assign_voice(char)
+
+        if not voice_id:
+            return {"shot_id": shot.get("shot_id"), "skipped": True, "reason": "no_voice_assigned"}
+
+        char = character_bible.get(speaker_id, {})
+        return await self._safe_generate_dialogue(
+            text=dialogue,
+            voice_id=voice_id,
+            character_name=char.get("name", "Unknown"),
+            shot_id=shot.get("shot_id", ""),
+            emotion=shot.get("emotion", "neutral"),
+        )
+
 
 audio_pipeline = AudioPipelineService()

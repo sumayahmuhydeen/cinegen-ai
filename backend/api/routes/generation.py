@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 def mock_user_id(): return "user_demo_001"
 
+def target_shot_num(shot_id: str) -> int:
+    """Extract shot number from shot_id like shot_001_002 -> 2"""
+    try:
+        return int(shot_id.split("_")[-1])
+    except (ValueError, IndexError):
+        return -1
+
 def get_project_or_404(project_id: str, db: Session) -> Project:
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
@@ -87,24 +94,30 @@ async def _run_full_pipeline_background(project_id: str, blueprint: dict):
         # Generate shots scene by scene
         for scene in blueprint.get("scenes", []):
             logger.info(f"[Pipeline] Generating scene {scene.get('scene_number')}")
-            scene_results = await shot_generator.generate_scene_shots(
+            scene_results = await shot_generator.generate_scene(
                 scene=scene,
                 character_bible=character_bible,
                 location_bible=location_bible,
                 style_bible=style_bible,
-                concurrency=2,
             )
-            all_shot_results.extend(scene_results)
+            # Convert ShotResult dataclasses to dicts
+            from dataclasses import asdict as _asd, is_dataclass as _isd
+            scene_dicts = [_asd(r) if _isd(r) else (r.to_dict() if hasattr(r,"to_dict") else r) for r in scene_results]
+            all_shot_results.extend(scene_dicts)
 
             # Update shot statuses in DB
-            for result in scene_results:
-                shot_id_str = result.get("shot_id", "")
-                shots = db.query(Shot).filter(Shot.project_id == project_id).all()
+            shots = db.query(Shot).filter(Shot.project_id == project_id).all()
+            for rd in scene_dicts:
+                sid_str = rd.get("shot_id", "")
+                try:
+                    shot_num = int(sid_str.split("_")[-1]) if "_" in sid_str else -1
+                except (ValueError, IndexError):
+                    shot_num = -1
                 for shot in shots:
-                    if shot.shot_number == int(shot_id_str.split("_")[-1]) if "_" in shot_id_str else False:
-                        shot.status = result.get("status", "completed")
-                        shot.video_url = result.get("video_url")
-                        shot.continuity_score = result.get("continuity_score")
+                    if shot.shot_number == shot_num:
+                        shot.status = rd.get("status") or "completed"
+                        shot.video_url = rd.get("video_url")
+                        shot.continuity_score = rd.get("continuity_score")
             db.commit()
 
         # Generate all audio in parallel
@@ -169,7 +182,7 @@ async def generate_single_shot(
         raise HTTPException(status_code=404, detail=f"Shot {shot_id_param} not found in blueprint.")
 
     # Generate the shot
-    result = await shot_generator.generate_shot(
+    shot_result = await shot_generator.generate_shot(
         shot=target_shot,
         scene=target_scene,
         character_bible=bp.get("character_bible", {}),
@@ -177,21 +190,32 @@ async def generate_single_shot(
         style_bible=bp.get("style_bible_locked", {}),
     )
 
+    # Convert ShotResult dataclass to plain dict safely
+    from dataclasses import asdict as dc_asdict, is_dataclass as is_dc
+    if is_dc(shot_result):
+        r = dc_asdict(shot_result)
+    elif hasattr(shot_result, "to_dict"):
+        r = shot_result.to_dict()
+    elif isinstance(shot_result, dict):
+        r = shot_result
+    else:
+        r = {"status": "completed", "shot_id": shot_id_param}
+
     # Update DB
     db_shots = db.query(Shot).filter(Shot.project_id == project_id).all()
     for db_shot in db_shots:
         if db_shot.shot_number == target_shot.get("shot_number"):
-            db_shot.status = result.get("status", "completed")
-            db_shot.video_url = result.get("video_url")
-            db_shot.generation_prompt = result.get("generation_prompt", "")[:500]
-            db_shot.continuity_score = result.get("continuity_score")
+            db_shot.status = r.get("status") or "completed"
+            db_shot.video_url = r.get("video_url")
+            db_shot.generation_prompt = (r.get("generation_prompt") or "")[:500]
+            db_shot.continuity_score = r.get("continuity_score")
             db_shot.retry_count = (db_shot.retry_count or 0) + 1
     db.commit()
 
     return {
         "shot_id": shot_id_param,
         "project_id": project_id,
-        **result,
+        **r,
         "message": f"Shot {shot_id_param} generated successfully"
     }
 
