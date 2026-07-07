@@ -55,8 +55,25 @@ async def start_full_pipeline(
         raise HTTPException(status_code=400, detail="No blueprint. Upload a script first.")
 
     bp = project.blueprint
-    approval = bp.get("character_bible", {})
-    # In production: check all characters approved. Skip check for demo.
+
+    # ── PRODUCER GATE: Check all bibles approved before generation ──
+    from models import Character, Location
+    chars = db.query(Character).filter(Character.project_id == project_id).all()
+    locs  = db.query(Location).filter(Location.project_id == project_id).all()
+
+    unapproved_chars = [c.name for c in chars if not c.approved]
+    unapproved_locs  = [l.name for l in locs  if not l.approved]
+
+    if unapproved_chars or unapproved_locs:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Cannot start generation. All characters and locations must be approved first.",
+                "unapproved_characters": unapproved_chars,
+                "unapproved_locations": unapproved_locs,
+                "fix": "POST /api/v1/characters/project/{id}/approve-all and POST /api/v1/locations/project/{id}/approve-all"
+            }
+        )
 
     project.status = "generating"
     db.commit()
