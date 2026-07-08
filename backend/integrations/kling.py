@@ -37,7 +37,8 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Kling API Configuration ───────────────────────────────────────────────────
-KLING_API_BASE = "https://api.klingai.com"
+KLING_API_BASE = "https://api.klingai.com"  # primary
+KLING_API_SINGAPORE = "https://api-singapore.klingai.com"  # fallback region
 
 # Model registry — producer's tiered selection
 KLING_MODELS = {
@@ -186,54 +187,66 @@ class KlingClient:
             return await self._mock_generate(prompt, shot, duration, shot_id)
 
         model = self.select_model(shot)
-        cost = self.calculate_cost(model, duration)
+        # Kling only accepts "5" or "10" as valid duration strings
+        kling_duration = "5" if int(duration) <= 7 else "10"
+        cost = self.calculate_cost(model, int(kling_duration))
 
-        logger.info(f"Shot {shot_id}: model={model} duration={duration}s cost=${cost}")
+        logger.info(f"Shot {shot_id}: model={model} duration={kling_duration}s cost=${cost}")
+
+        payload = {
+            "model_name": model,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or self._default_negative_prompt(),
+            "cfg_scale": 0.5,
+            "mode": "std",
+            "aspect_ratio": aspect_ratio,
+            "duration": kling_duration,
+        }
+
+        # Try primary endpoint first, then Singapore region
+        endpoints = [KLING_API_BASE, KLING_API_SINGAPORE]
 
         async with httpx.AsyncClient(timeout=120.0) as client:
-            try:
-                payload = {
-                    "model_name": model,
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt or self._default_negative_prompt(),
-                    "cfg_scale": 0.5,
-                    "mode": "std",
-                    "aspect_ratio": aspect_ratio,
-                    "duration": str(duration),
-                }
+            last_error = None
+            for endpoint in endpoints:
+                try:
+                    response = await client.post(
+                        f"{endpoint}/v1/videos/text2video",
+                        headers=self._headers(),
+                        json=payload,
+                    )
 
-                response = await client.post(
-                    f"{KLING_API_BASE}/v1/videos/text2video",
-                    headers=self._headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("code") != 0:
+                            raise Exception(f"Kling API error: {data.get('message', 'Unknown error')}")
 
-                if data.get("code") != 0:
-                    raise Exception(f"Kling API error: {data.get('message', 'Unknown error')}")
+                        task_id = data["data"]["task_id"]
+                        logger.info(f"Shot {shot_id}: Kling job submitted — task_id={task_id}")
 
-                task_id = data["data"]["task_id"]
-                logger.info(f"Shot {shot_id}: Kling job submitted — task_id={task_id}")
+                        return GenerationResult(
+                            shot_id=shot_id,
+                            job_id=task_id,
+                            status="submitted",
+                            video_url=None,
+                            duration_seconds=int(kling_duration),
+                            model_used=model,
+                            cost_usd=cost,
+                            provider="kling",
+                            prompt_used=prompt[:200],
+                        )
+                    else:
+                        error_text = response.text[:200]
+                        logger.warning(f"Kling {endpoint} returned {response.status_code}: {error_text}")
+                        last_error = Exception(f"HTTP {response.status_code}: {error_text}")
 
-                return GenerationResult(
-                    shot_id=shot_id,
-                    job_id=task_id,
-                    status="submitted",
-                    video_url=None,
-                    duration_seconds=duration,
-                    model_used=model,
-                    cost_usd=cost,
-                    provider="kling",
-                    prompt_used=prompt[:200],
-                )
+                except httpx.HTTPStatusError as e:
+                    logger.warning(f"Kling endpoint {endpoint} failed: {e}")
+                    last_error = e
+                    continue
 
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Kling HTTP error for shot {shot_id}: {e.response.status_code} — {e.response.text}")
-                raise
-            except Exception as e:
-                logger.error(f"Kling error for shot {shot_id}: {e}")
-                raise
+            # Both endpoints failed
+            raise last_error or Exception("All Kling endpoints failed")
 
     async def poll_until_complete(
         self,
@@ -271,6 +284,14 @@ class KlingClient:
                         f"{KLING_API_BASE}/v1/videos/text2video/{job_id}",
                         headers=self._headers(),
                     )
+
+                    # Try Singapore if primary fails
+                    if response.status_code != 200:
+                        response = await client.get(
+                            f"{KLING_API_SINGAPORE}/v1/videos/text2video/{job_id}",
+                            headers=self._headers(),
+                        )
+
                     response.raise_for_status()
                     data = response.json()
 

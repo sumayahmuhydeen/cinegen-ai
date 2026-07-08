@@ -40,7 +40,7 @@ class RunwayClient:
                 },
                 json={
                     "promptText": prompt,
-                    "duration": duration,
+                    "duration": int(duration),
                     "ratio": "1280:720",
                 }
             )

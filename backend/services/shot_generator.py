@@ -123,7 +123,9 @@ class ShotGeneratorService:
         )
 
         # Step 4: Generate with retry logic
-        duration = max(5, min(shot.get("duration_estimate", 8), 10))
+        # Kling only accepts "5" or "10" as duration values
+        raw_duration = shot.get("duration_estimate", 8)
+        duration = 10 if int(raw_duration) > 7 else 5
 
         for attempt in range(MAX_RETRIES):
             try:
