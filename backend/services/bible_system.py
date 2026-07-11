@@ -108,7 +108,20 @@ class BibleSystem:
 
         # Append style suffix
         style_suffix = style_bible.get("global_prompt_suffix", "")
-        return f"{base_prompt} {style_suffix}".strip()
+        full_prompt = f"{base_prompt} {style_suffix}".strip()
+
+        # KLING HARD LIMIT: 2400 chars (buffer below 2500 API limit)
+        MAX_CHARS = 2400
+        if len(full_prompt) > MAX_CHARS:
+            # Shorten descriptions and rebuild
+            short_chars = {k: v[:250] for k, v in char_descriptions.items()}
+            short_loc = location_desc[:200]
+            base_prompt = script_intelligence_service.generate_shot_prompt(
+                shot, short_chars, short_loc
+            )
+            full_prompt = f"{base_prompt} {style_suffix}".strip()[:MAX_CHARS]
+
+        return full_prompt
 
     def check_approval_status(
         self,

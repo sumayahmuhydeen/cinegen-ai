@@ -193,10 +193,22 @@ class KlingClient:
 
         logger.info(f"Shot {shot_id}: model={model} duration={kling_duration}s cost=${cost}")
 
+        # ── Kling hard limits ─────────────────────────────────────────
+        # prompt: 0-2500 chars, negative_prompt: 0-2500 chars
+        MAX_CHARS = 2400  # 100 char buffer below the 2500 limit
+        safe_prompt = prompt[:MAX_CHARS] if len(prompt) > MAX_CHARS else prompt
+        safe_neg    = (negative_prompt or self._default_negative_prompt())[:MAX_CHARS]
+
+        if len(prompt) > MAX_CHARS:
+            logger.warning(
+                f"Shot {shot_id}: prompt truncated "
+                f"{len(prompt)} → {MAX_CHARS} chars (Kling 2500 limit)"
+            )
+
         payload = {
             "model_name": model,
-            "prompt": prompt,
-            "negative_prompt": negative_prompt or self._default_negative_prompt(),
+            "prompt": safe_prompt,
+            "negative_prompt": safe_neg,
             "cfg_scale": 0.5,
             "mode": "std",
             "aspect_ratio": aspect_ratio,
